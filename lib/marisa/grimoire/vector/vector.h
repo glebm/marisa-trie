@@ -214,7 +214,13 @@ class Vector {
   }
 
  private:
-  std::unique_ptr<char[]> buf_;
+  struct AlignedArrayDeleter {
+    void operator()(char *p) const {
+      operator delete[](p, std::align_val_t{alignof(T)});
+    };
+  };
+
+  std::unique_ptr<char[], AlignedArrayDeleter> buf_;
   T *objs_ = nullptr;
   const T *const_objs_ = nullptr;
   std::size_t size_ = 0;
@@ -254,10 +260,10 @@ class Vector {
     MARISA_DEBUG_IF(new_capacity < size_, MARISA_CODE_ERROR);
     MARISA_DEBUG_IF(new_capacity > max_size(), MARISA_SIZE_ERROR);
 
-    std::unique_ptr<char[]> new_buf(
-        new (std::nothrow) char[sizeof(T) * new_capacity]);
-    MARISA_DEBUG_IF(new_buf == nullptr, MARISA_MEMORY_ERROR);
-    T *new_objs = reinterpret_cast<T *>(new_buf.get());
+    std::unique_ptr<char[], AlignedArrayDeleter> new_buf =
+        allocBuffer(new_capacity);
+    T *new_objs = std::launder(
+        reinterpret_cast<T *>(std::assume_aligned<alignof(T)>(new_buf.get())));
 
     static_assert(std::is_trivially_copyable_v<T>);
     std::memcpy(new_objs, objs_, sizeof(T) * size_);
@@ -273,9 +279,8 @@ class Vector {
   void copyInit(const T *src, std::size_t size, std::size_t capacity) {
     MARISA_DEBUG_IF(size_ > 0, MARISA_CODE_ERROR);
 
-    buf_.reset(new (std::nothrow) char[sizeof(T) * capacity]);
-    MARISA_DEBUG_IF(buf_ == nullptr, MARISA_MEMORY_ERROR);
-    T *new_objs = reinterpret_cast<T *>(buf_.get());
+    buf_ = allocBuffer(capacity);
+    T *new_objs = objs();
 
     static_assert(std::is_trivially_copyable_v<T>);
     std::memcpy(new_objs, src, sizeof(T) * size);
@@ -284,6 +289,13 @@ class Vector {
     const_objs_ = new_objs;
     size_ = size;
     capacity_ = capacity;
+  }
+
+  static std::unique_ptr<char[], AlignedArrayDeleter> allocBuffer(size_t len) {
+    std::unique_ptr<char[], AlignedArrayDeleter> result{
+        new (std::align_val_t{alignof(T)}, std::nothrow) char[sizeof(T) * len]};
+    MARISA_DEBUG_IF(result == nullptr, MARISA_MEMORY_ERROR);
+    return result;
   }
 };
 
