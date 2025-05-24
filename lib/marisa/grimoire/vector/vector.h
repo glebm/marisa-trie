@@ -25,7 +25,6 @@ class Vector {
 
   Vector(const Vector<T> &other) : fixed_(other.fixed_) {
     if (other.buf_ == nullptr) {
-      objs_ = other.objs_;
       const_objs_ = other.const_objs_;
       size_ = other.size_;
       capacity_ = other.capacity_;
@@ -38,7 +37,6 @@ class Vector {
     clear();
     fixed_ = other.fixed_;
     if (other.buf_ == nullptr) {
-      objs_ = other.objs_;
       const_objs_ = other.const_objs_;
       size_ = other.size_;
       capacity_ = other.capacity_;
@@ -71,7 +69,7 @@ class Vector {
     MARISA_DEBUG_IF(fixed_, MARISA_STATE_ERROR);
     MARISA_DEBUG_IF(size_ == max_size(), MARISA_SIZE_ERROR);
     reserve(size_ + 1);
-    new (&objs_[size_]) T(x);
+    new (&objs()[size_]) T(x);
     ++size_;
   }
 
@@ -87,7 +85,7 @@ class Vector {
     MARISA_DEBUG_IF(fixed_, MARISA_STATE_ERROR);
     reserve(size);
     for (std::size_t i = size_; i < size; ++i) {
-      new (&objs_[i]) T;
+      new (&objs()[i]) T;
     }
     static_assert(std::is_trivially_destructible_v<T>);
     size_ = size;
@@ -98,7 +96,7 @@ class Vector {
     MARISA_DEBUG_IF(fixed_, MARISA_STATE_ERROR);
     reserve(size);
     if (size > size_) {
-      std::fill_n(&objs_[size_], size - size_, x);
+      std::fill_n(objs() + size_, size - size_, x);
     }
     // No need to destroy old elements.
     static_assert(std::is_trivially_destructible_v<T>);
@@ -155,26 +153,26 @@ class Vector {
 
   T *begin() {
     MARISA_DEBUG_IF(fixed_, MARISA_STATE_ERROR);
-    return objs_;
+    return objs();
   }
   T *end() {
     MARISA_DEBUG_IF(fixed_, MARISA_STATE_ERROR);
-    return objs_ + size_;
+    return objs() + size_;
   }
   T &operator[](std::size_t i) {
     MARISA_DEBUG_IF(fixed_, MARISA_STATE_ERROR);
     MARISA_DEBUG_IF(i >= size_, MARISA_BOUND_ERROR);
-    return objs_[i];
+    return objs()[i];
   }
   T &front() {
     MARISA_DEBUG_IF(fixed_, MARISA_STATE_ERROR);
     MARISA_DEBUG_IF(size_ == 0, MARISA_STATE_ERROR);
-    return objs_[0];
+    return objs()[0];
   }
   T &back() {
     MARISA_DEBUG_IF(fixed_, MARISA_STATE_ERROR);
     MARISA_DEBUG_IF(size_ == 0, MARISA_STATE_ERROR);
-    return objs_[size_ - 1];
+    return objs()[size_ - 1];
   }
 
   std::size_t size() const {
@@ -202,7 +200,6 @@ class Vector {
   }
   void swap(Vector &rhs) {
     buf_.swap(rhs.buf_);
-    marisa::swap(objs_, rhs.objs_);
     marisa::swap(const_objs_, rhs.const_objs_);
     marisa::swap(size_, rhs.size_);
     marisa::swap(capacity_, rhs.capacity_);
@@ -221,11 +218,15 @@ class Vector {
   };
 
   std::unique_ptr<char[], AlignedArrayDeleter> buf_;
-  T *objs_ = nullptr;
   const T *const_objs_ = nullptr;
   std::size_t size_ = 0;
   std::size_t capacity_ = 0;
   bool fixed_ = false;
+
+  T *objs() {
+    return std::launder(
+        reinterpret_cast<T *>(std::assume_aligned<alignof(T)>(buf_.get())));
+  }
 
   void map_(Mapper &mapper) {
     UInt64 total_size;
@@ -245,7 +246,7 @@ class Vector {
     MARISA_THROW_IF((total_size % sizeof(T)) != 0, MARISA_FORMAT_ERROR);
     const std::size_t size = (std::size_t)(total_size / sizeof(T));
     resize(size);
-    reader.read(objs_, size);
+    reader.read(objs(), size);
     reader.seek((std::size_t)((8 - (total_size % 8)) % 8));
   }
   void write_(Writer &writer) const {
@@ -266,10 +267,9 @@ class Vector {
         reinterpret_cast<T *>(std::assume_aligned<alignof(T)>(new_buf.get())));
 
     static_assert(std::is_trivially_copyable_v<T>);
-    std::memcpy(new_objs, objs_, sizeof(T) * size_);
+    std::memcpy(new_objs, objs(), sizeof(T) * size_);
 
     buf_ = std::move(new_buf);
-    objs_ = new_objs;
     const_objs_ = new_objs;
     capacity_ = new_capacity;
   }
@@ -285,7 +285,6 @@ class Vector {
     static_assert(std::is_trivially_copyable_v<T>);
     std::memcpy(new_objs, src, sizeof(T) * size);
 
-    objs_ = new_objs;
     const_objs_ = new_objs;
     size_ = size;
     capacity_ = capacity;
