@@ -23,7 +23,7 @@ class Vector {
   // `T` is trivially destructible, so default destructor is ok.
   ~Vector() = default;
 
-  Vector(const Vector<T> &other) : fixed_(other.fixed_) {
+  Vector(const Vector<T> &other) {
     if (other.buf_ == nullptr) {
       const_objs_ = other.const_objs_;
       size_ = other.size_;
@@ -35,7 +35,6 @@ class Vector {
 
   Vector &operator=(const Vector<T> &other) {
     clear();
-    fixed_ = other.fixed_;
     if (other.buf_ == nullptr) {
       const_objs_ = other.const_objs_;
       size_ = other.size_;
@@ -66,7 +65,7 @@ class Vector {
   }
 
   void push_back(const T &x) {
-    MARISA_DEBUG_IF(fixed_, MARISA_STATE_ERROR);
+    MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
     MARISA_DEBUG_IF(size_ == max_size(), MARISA_SIZE_ERROR);
     reserve(size_ + 1);
     new (&objs()[size_]) T(x);
@@ -74,7 +73,7 @@ class Vector {
   }
 
   void pop_back() {
-    MARISA_DEBUG_IF(fixed_, MARISA_STATE_ERROR);
+    MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
     MARISA_DEBUG_IF(size_ == 0, MARISA_STATE_ERROR);
     --size_;
     static_assert(std::is_trivially_destructible_v<T>);
@@ -82,7 +81,7 @@ class Vector {
 
   // resize() assumes that T's placement new does not throw an exception.
   void resize(std::size_t size) {
-    MARISA_DEBUG_IF(fixed_, MARISA_STATE_ERROR);
+    MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
     reserve(size);
     for (std::size_t i = size_; i < size; ++i) {
       new (&objs()[i]) T;
@@ -93,7 +92,7 @@ class Vector {
 
   // resize() assumes that T's placement new does not throw an exception.
   void resize(std::size_t size, const T &x) {
-    MARISA_DEBUG_IF(fixed_, MARISA_STATE_ERROR);
+    MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
     reserve(size);
     if (size > size_) {
       std::fill_n(objs() + size_, size - size_, x);
@@ -104,7 +103,7 @@ class Vector {
   }
 
   void reserve(std::size_t capacity) {
-    MARISA_DEBUG_IF(fixed_, MARISA_STATE_ERROR);
+    MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
     if (capacity <= capacity_) {
       return;
     }
@@ -121,15 +120,10 @@ class Vector {
   }
 
   void shrink() {
-    MARISA_THROW_IF(fixed_, MARISA_STATE_ERROR);
+    MARISA_THROW_IF(fixed(), MARISA_STATE_ERROR);
     if (size_ != capacity_) {
       realloc(size_);
     }
-  }
-
-  void fix() {
-    MARISA_THROW_IF(fixed_, MARISA_STATE_ERROR);
-    fixed_ = true;
   }
 
   const T *begin() const {
@@ -152,25 +146,25 @@ class Vector {
   }
 
   T *begin() {
-    MARISA_DEBUG_IF(fixed_, MARISA_STATE_ERROR);
+    MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
     return objs();
   }
   T *end() {
-    MARISA_DEBUG_IF(fixed_, MARISA_STATE_ERROR);
+    MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
     return objs() + size_;
   }
   T &operator[](std::size_t i) {
-    MARISA_DEBUG_IF(fixed_, MARISA_STATE_ERROR);
+    MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
     MARISA_DEBUG_IF(i >= size_, MARISA_BOUND_ERROR);
     return objs()[i];
   }
   T &front() {
-    MARISA_DEBUG_IF(fixed_, MARISA_STATE_ERROR);
+    MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
     MARISA_DEBUG_IF(size_ == 0, MARISA_STATE_ERROR);
     return objs()[0];
   }
   T &back() {
-    MARISA_DEBUG_IF(fixed_, MARISA_STATE_ERROR);
+    MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
     MARISA_DEBUG_IF(size_ == 0, MARISA_STATE_ERROR);
     return objs()[size_ - 1];
   }
@@ -182,7 +176,7 @@ class Vector {
     return capacity_;
   }
   bool fixed() const {
-    return fixed_;
+    return buf_ == nullptr && const_objs_ != nullptr;
   }
 
   bool empty() const {
@@ -203,7 +197,6 @@ class Vector {
     marisa::swap(const_objs_, rhs.const_objs_);
     marisa::swap(size_, rhs.size_);
     marisa::swap(capacity_, rhs.capacity_);
-    marisa::swap(fixed_, rhs.fixed_);
   }
 
   static std::size_t max_size() {
@@ -221,7 +214,6 @@ class Vector {
   const T *const_objs_ = nullptr;
   std::size_t size_ = 0;
   std::size_t capacity_ = 0;
-  bool fixed_ = false;
 
   T *objs() {
     return std::launder(
@@ -237,7 +229,6 @@ class Vector {
     mapper.map(&const_objs_, size);
     mapper.seek((std::size_t)((8 - (total_size % 8)) % 8));
     size_ = size;
-    fix();
   }
   void read_(Reader &reader) {
     UInt64 total_size;
