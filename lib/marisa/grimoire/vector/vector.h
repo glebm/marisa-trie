@@ -1,11 +1,9 @@
 #ifndef MARISA_GRIMOIRE_VECTOR_VECTOR_H_
 #define MARISA_GRIMOIRE_VECTOR_VECTOR_H_
 
-#include <cstring>
-#include <memory>
-#include <new>
 #include <type_traits>
 #include <utility>
+#include <vector>
 
 #include "marisa/grimoire/io.h"
 
@@ -24,23 +22,22 @@ class Vector {
   ~Vector() = default;
 
   Vector(const Vector<T> &other) {
-    if (other.buf_ == nullptr) {
+    size_ = other.size_;
+    if (other.fixed()) {
       const_objs_ = other.const_objs_;
-      size_ = other.size_;
-      capacity_ = other.capacity_;
     } else {
-      copyInit(other.const_objs_, other.size_, other.capacity_);
+      owned_objs_ = other.owned_objs_;
+      const_objs_ = owned_objs_.data();
     }
   }
 
   Vector &operator=(const Vector<T> &other) {
-    clear();
-    if (other.buf_ == nullptr) {
+    size_ = other.size_;
+    if (other.fixed()) {
       const_objs_ = other.const_objs_;
-      size_ = other.size_;
-      capacity_ = other.capacity_;
     } else {
-      copyInit(other.const_objs_, other.size_, other.capacity_);
+      owned_objs_ = other.owned_objs_;
+      const_objs_ = owned_objs_.data();
     }
     return *this;
   }
@@ -67,63 +64,45 @@ class Vector {
   void push_back(const T &x) {
     MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
     MARISA_DEBUG_IF(size_ == max_size(), MARISA_SIZE_ERROR);
-    reserve(size_ + 1);
-    new (&objs()[size_]) T(x);
+    owned_objs_.push_back(x);
+    const_objs_ = owned_objs_.data();
     ++size_;
   }
 
   void pop_back() {
     MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
     MARISA_DEBUG_IF(size_ == 0, MARISA_STATE_ERROR);
+    owned_objs_.pop_back();
+    const_objs_ = owned_objs_.data();
     --size_;
-    static_assert(std::is_trivially_destructible_v<T>);
   }
 
   // resize() assumes that T's placement new does not throw an exception.
   void resize(std::size_t size) {
     MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
-    reserve(size);
-    for (std::size_t i = size_; i < size; ++i) {
-      new (&objs()[i]) T;
-    }
-    static_assert(std::is_trivially_destructible_v<T>);
+    owned_objs_.resize(size);
+    const_objs_ = owned_objs_.data();
     size_ = size;
   }
 
   // resize() assumes that T's placement new does not throw an exception.
   void resize(std::size_t size, const T &x) {
     MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
-    reserve(size);
-    if (size > size_) {
-      std::fill_n(objs() + size_, size - size_, x);
-    }
-    // No need to destroy old elements.
-    static_assert(std::is_trivially_destructible_v<T>);
+    owned_objs_.resize(size, x);
+    const_objs_ = owned_objs_.data();
     size_ = size;
   }
 
   void reserve(std::size_t capacity) {
     MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
-    if (capacity <= capacity_) {
-      return;
-    }
-    MARISA_DEBUG_IF(capacity > max_size(), MARISA_SIZE_ERROR);
-    std::size_t new_capacity = capacity;
-    if (capacity_ > (capacity / 2)) {
-      if (capacity_ > (max_size() / 2)) {
-        new_capacity = max_size();
-      } else {
-        new_capacity = capacity_ * 2;
-      }
-    }
-    realloc(new_capacity);
+    owned_objs_.reserve(capacity);
+    const_objs_ = owned_objs_.data();
   }
 
   void shrink() {
     MARISA_THROW_IF(fixed(), MARISA_STATE_ERROR);
-    if (size_ != capacity_) {
-      realloc(size_);
-    }
+    owned_objs_.shrink_to_fit();
+    const_objs_ = owned_objs_.data();
   }
 
   const T *begin() const {
@@ -147,36 +126,36 @@ class Vector {
 
   T *begin() {
     MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
-    return objs();
+    return owned_objs_.data();
   }
   T *end() {
     MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
-    return objs() + size_;
+    return owned_objs_.data() + size_;
   }
   T &operator[](std::size_t i) {
     MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
     MARISA_DEBUG_IF(i >= size_, MARISA_BOUND_ERROR);
-    return objs()[i];
+    return owned_objs_[i];
   }
   T &front() {
     MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
     MARISA_DEBUG_IF(size_ == 0, MARISA_STATE_ERROR);
-    return objs()[0];
+    return owned_objs_.front();
   }
   T &back() {
     MARISA_DEBUG_IF(fixed(), MARISA_STATE_ERROR);
     MARISA_DEBUG_IF(size_ == 0, MARISA_STATE_ERROR);
-    return objs()[size_ - 1];
+    return owned_objs_.back();
   }
 
   std::size_t size() const {
     return size_;
   }
   std::size_t capacity() const {
-    return capacity_;
+    return owned_objs_.capacity();
   }
   bool fixed() const {
-    return buf_ == nullptr && const_objs_ != nullptr;
+    return owned_objs_.empty() && size_ != 0;
   }
 
   bool empty() const {
@@ -193,10 +172,9 @@ class Vector {
     Vector().swap(*this);
   }
   void swap(Vector &rhs) {
-    buf_.swap(rhs.buf_);
+    owned_objs_.swap(rhs.owned_objs_);
     marisa::swap(const_objs_, rhs.const_objs_);
     marisa::swap(size_, rhs.size_);
-    marisa::swap(capacity_, rhs.capacity_);
   }
 
   static std::size_t max_size() {
@@ -204,21 +182,9 @@ class Vector {
   }
 
  private:
-  struct AlignedArrayDeleter {
-    void operator()(char *p) const {
-      operator delete[](p, std::align_val_t{alignof(T)});
-    };
-  };
-
-  std::unique_ptr<char[], AlignedArrayDeleter> buf_;
+  std::vector<T> owned_objs_;
   const T *const_objs_ = nullptr;
   std::size_t size_ = 0;
-  std::size_t capacity_ = 0;
-
-  T *objs() {
-    return std::launder(
-        reinterpret_cast<T *>(std::assume_aligned<alignof(T)>(buf_.get())));
-  }
 
   void map_(Mapper &mapper) {
     UInt64 total_size;
@@ -237,55 +203,14 @@ class Vector {
     MARISA_THROW_IF((total_size % sizeof(T)) != 0, MARISA_FORMAT_ERROR);
     const std::size_t size = (std::size_t)(total_size / sizeof(T));
     resize(size);
-    reader.read(objs(), size);
+    reader.read(owned_objs_.data(), size);
+    const_objs_ = owned_objs_.data();
     reader.seek((std::size_t)((8 - (total_size % 8)) % 8));
   }
   void write_(Writer &writer) const {
     writer.write((UInt64)total_size());
     writer.write(const_objs_, size_);
     writer.seek((8 - (total_size() % 8)) % 8);
-  }
-
-  // Copies current elements to new buffer of size `new_capacity`.
-  // Requires `new_capacity >= size_`.
-  void realloc(std::size_t new_capacity) {
-    MARISA_DEBUG_IF(new_capacity < size_, MARISA_CODE_ERROR);
-    MARISA_DEBUG_IF(new_capacity > max_size(), MARISA_SIZE_ERROR);
-
-    std::unique_ptr<char[], AlignedArrayDeleter> new_buf =
-        allocBuffer(new_capacity);
-    T *new_objs = std::launder(
-        reinterpret_cast<T *>(std::assume_aligned<alignof(T)>(new_buf.get())));
-
-    static_assert(std::is_trivially_copyable_v<T>);
-    std::memcpy(new_objs, objs(), sizeof(T) * size_);
-
-    buf_ = std::move(new_buf);
-    const_objs_ = new_objs;
-    capacity_ = new_capacity;
-  }
-
-  // copyInit() assumes that T's placement new does not throw an exception.
-  // Requires the vector to be empty.
-  void copyInit(const T *src, std::size_t size, std::size_t capacity) {
-    MARISA_DEBUG_IF(size_ > 0, MARISA_CODE_ERROR);
-
-    buf_ = allocBuffer(capacity);
-    T *new_objs = objs();
-
-    static_assert(std::is_trivially_copyable_v<T>);
-    std::memcpy(new_objs, src, sizeof(T) * size);
-
-    const_objs_ = new_objs;
-    size_ = size;
-    capacity_ = capacity;
-  }
-
-  static std::unique_ptr<char[], AlignedArrayDeleter> allocBuffer(size_t len) {
-    std::unique_ptr<char[], AlignedArrayDeleter> result{
-        new (std::align_val_t{alignof(T)}, std::nothrow) char[sizeof(T) * len]};
-    MARISA_DEBUG_IF(result == nullptr, MARISA_MEMORY_ERROR);
-    return result;
   }
 };
 
